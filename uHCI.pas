@@ -180,7 +180,6 @@ var
  FWHandle:integer; // firmware file handle
  RxBuffer:array of byte;
  HciSequenceNumber:Integer;
- NonBlockEntered,NonBlockReturned:Integer;
 
 implementation
 
@@ -633,10 +632,10 @@ begin
  Result:=0;
  while True do
   begin
-   Capture1:=NonBlockEntered;
-   Capture2:=NonBlockReturned;
+   Capture1:=SerialDeviceReadEnterCount;
+   Capture2:=SerialDeviceReadExitCount;
    if Capture1 <> Capture2 then
-    Log(Format('ReadExecute is not balanced: %d entries %d exits',[Capture1,Capture2]));
+    Log(Format('SerialDeviceRead is not balanced: %d entries %d exits',[Capture1,Capture2]));
    Sleep(5*1000);
   end;
 end;
@@ -654,6 +653,7 @@ begin
  try
   Result:=0;
   Log(Format('ReadExecute thread handle %8.8x',[ThreadGetCurrent]));
+  SerialDeviceReadResetEnterExitCounts;
   // put monitoring thread on same cpu as ReadExecute to avoid cross-cpu caching issues
   ThreadSetCpu(MonitorReadExecuteHandle,CpuGetCurrent);
   ThreadYield;
@@ -661,24 +661,18 @@ begin
   while True do
    begin
     ThreadYield;
-    Inc(NonBlockEntered);
     res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-    Inc(NonBlockReturned);
     if (res = ERROR_SUCCESS) and (c = 1) then
      begin
       // One byte was received,try to read everything that is available
       SetLength(RxBuffer,length(RxBuffer) + 1);
       RxBuffer[high(RxBuffer)]:=b;
-      Inc(NonBlockEntered);
       res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-      Inc(NonBlockReturned);
       while (res = ERROR_SUCCESS) and(c = 1) do
        begin
         SetLength(RxBuffer,length(RxBuffer) + 1);
         RxBuffer[high(RxBuffer)]:=b;
-        Inc(NonBlockEntered);
         res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-        Inc(NonBlockReturned);
        end;
       //if Length(RxBuffer) > 50 then
       // Log(Format('rx buffer %d',[Length(RxBuffer)]));
@@ -761,12 +755,10 @@ begin
    Result:=True;
    GPIOFunctionSelect(GPIO_PIN_14,GPIO_FUNCTION_IN);
    GPIOFunctionSelect(GPIO_PIN_15,GPIO_FUNCTION_IN);
-   GPIOPullSelect(GPIO_PIN_32,GPIO_PULL_NONE);                    //Added
+// GPIOPullSelect(GPIO_PIN_32,GPIO_PULL_NONE);                    //Added
    GPIOFunctionSelect(GPIO_PIN_32,GPIO_FUNCTION_ALT3);     // TXD0
-   GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);                        //Added
+// GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);                        //Added
    GPIOFunctionSelect(GPIO_PIN_33,GPIO_FUNCTION_ALT3);     // RXD0
-   NonBlockEntered:=0;
-   NonBlockReturned:=0;
    ReadHandle:=BeginThread(@ReadExecute,Nil,ReadHandle,THREAD_STACK_DEFAULT_SIZE);
    Result:=ReadHandle <> INVALID_HANDLE_VALUE;
   end;

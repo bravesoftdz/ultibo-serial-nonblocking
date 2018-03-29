@@ -3,7 +3,7 @@ program BLETest;
 
 uses 
 RaspberryPi3,
-//HTTP,WebStatus,
+HTTP,WebStatus,
 GlobalConfig,
 GlobalConst,
 GlobalTypes,
@@ -77,8 +77,8 @@ begin
  LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
 end;
 
-//var 
-// HTTPListener:THTTPListener;
+var 
+ HTTPListener:THTTPListener;
 
 begin
  Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_LEFT,True);
@@ -91,9 +91,9 @@ begin
  WaitForSDDrive;
 
  begin
-//HTTPListener:=THTTPListener.Create;
-//HTTPListener.Active:=True;
-//WebStatusRegister(HTTPListener,'','',True);
+  HTTPListener:=THTTPListener.Create;
+  HTTPListener.Active:=True;
+  WebStatusRegister(HTTPListener,'','',True);
 
   SetMarkerEvent(@DoMarkerEvent);       // set marker event(called when marker processed on event queue)
   AddMarker(OPEN_PORT);                 // open uart
