@@ -3,14 +3,14 @@ program BLETest;
 
 uses 
 RaspberryPi3,
-HTTP,WebStatus,
+//HTTP,WebStatus,
 GlobalConfig,
 GlobalConst,
 GlobalTypes,
 Platform,
 Threads,
 SysUtils,
-Classes,Console,Keyboard,
+Classes,Console,Keyboard,Logging,
 uLog,uBLE,
 Ultibo,uHCI
   { Add additional units here };
@@ -69,22 +69,31 @@ begin
  end;
 end;
 
-var 
- HTTPListener:THTTPListener;
+procedure StartLogging;
+begin
+ LOGGING_INCLUDE_COUNTER:=False;
+ CONSOLE_REGISTER_LOGGING:=True;
+ LoggingConsoleDeviceAdd(ConsoleDeviceGetDefault);
+ LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
+end;
+
+//var 
+// HTTPListener:THTTPListener;
 
 begin
  Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_LEFT,True);
  Log1('Bluetooth Low Energy (BLE) Peripheral Test');
  RestoreBootFile('default','config.txt');
+ StartLogging;
  SetLogProc(@Log1);
  Log1('Q - Quit - use default-config.txt');
  Log1('R - Restart - use test-config.txt');
  WaitForSDDrive;
 
  begin
-  HTTPListener:=THTTPListener.Create;
-  HTTPListener.Active:=True;
-  WebStatusRegister(HTTPListener,'','',True);
+//HTTPListener:=THTTPListener.Create;
+//HTTPListener.Active:=True;
+//WebStatusRegister(HTTPListener,'','',True);
 
   SetMarkerEvent(@DoMarkerEvent);       // set marker event(called when marker processed on event queue)
   AddMarker(OPEN_PORT);                 // open uart

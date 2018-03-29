@@ -209,6 +209,7 @@ var
  QueueEvent:TEvent;
  MarkerEvent:TBTMarkerEvent = Nil;
  LEEvent:TBTLEEvent = Nil;
+ MonitorReadExecuteHandle:TThreadHandle = INVALID_HANDLE_VALUE;
 
 const 
  ADV_IND                     = $00; // Connectable undirected advertising(default)
@@ -625,6 +626,21 @@ begin
  end;
 end;
 
+function Monitor(Parameter:Pointer):PtrInt;
+var
+ Capture1,Capture2:Integer;
+begin
+ Result:=0;
+ while True do
+  begin
+   Capture1:=NonBlockEntered;
+   Capture2:=NonBlockReturned;
+   if Capture1 <> Capture2 then
+    Log(Format('ReadExecute is not balanced: %d entries %d exits',[Capture1,Capture2]));
+   Sleep(5*1000);
+  end;
+end;
+
 function ReadExecute(Parameter:Pointer):PtrInt;
 var 
  DataLength:Integer;
@@ -638,6 +654,9 @@ begin
  try
   Result:=0;
   Log(Format('ReadExecute thread handle %8.8x',[ThreadGetCurrent]));
+  // put monitoring thread on same cpu as ReadExecute to avoid cross-cpu caching issues
+  ThreadSetCpu(MonitorReadExecuteHandle,CpuGetCurrent);
+  ThreadYield;
   c:=0;
   while True do
    begin
@@ -742,7 +761,9 @@ begin
    Result:=True;
    GPIOFunctionSelect(GPIO_PIN_14,GPIO_FUNCTION_IN);
    GPIOFunctionSelect(GPIO_PIN_15,GPIO_FUNCTION_IN);
+   GPIOPullSelect(GPIO_PIN_32,GPIO_PULL_NONE);                    //Added
    GPIOFunctionSelect(GPIO_PIN_32,GPIO_FUNCTION_ALT3);     // TXD0
+   GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);                        //Added
    GPIOFunctionSelect(GPIO_PIN_33,GPIO_FUNCTION_ALT3);     // RXD0
    NonBlockEntered:=0;
    NonBlockReturned:=0;
@@ -861,17 +882,6 @@ begin
            for i:=0 to length(RxBuffer) - 1 do
             s:=s + ' ' + RxBuffer[i].ToHexString(2);
            Log('<-- ' + s);
-           Log(Format('ReadExecute non-block calls entered: %d returned: %d',[NonBlockEntered,NonBlockReturned]));
-           if NonBlockEntered = NonBlockReturned then
-            begin
-             Log('');
-             Log('Not the nonblocking issue. Restarting in 10 seconds');
-             Sleep(10*1000);
-             RestoreBootFile('test','config.txt');
-             Log('restarting ...');
-             Sleep(1*1000);
-             SystemRestart(0);
-            end;
            ThreadHalt(0);
           end;
         end
@@ -1213,4 +1223,5 @@ SetLength(RxBuffer,0);
 Queue:=MailSlotCreate(1024);
 QueueEvent:=TEvent.Create(Nil,True,False,'');
 QueueHandle:=BeginThread(@QueueHandler,Nil,QueueHandle,THREAD_STACK_DEFAULT_SIZE);
+MonitorReadExecuteHandle:=BeginThread(@Monitor,Nil,MonitorReadExecuteHandle,THREAD_STACK_DEFAULT_SIZE);
 end.
