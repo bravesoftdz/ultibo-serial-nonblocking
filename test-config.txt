@@ -1,0 +1,8 @@
+[pi3]
+kernel=test-kernel7.img
+
+[pi0]
+kernel=test-kernel.img
+
+[all]
+cmdline=test-cmdline.txt
