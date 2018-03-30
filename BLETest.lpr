@@ -9,47 +9,25 @@ Classes,Console,Keyboard,Logging,Ultibo,Serial,BCM2710,FileSystem,SyncObjs;
 const 
  HCI_COMMAND_PKT               = $01;
  HCI_EVENT_PKT                 = $04;
- FIRMWARE_START                = 100;
- FIRMWARE_END                  = 101;
- DELAY_50MSEC                  = 102;
- DELAY_2SEC                    = 103;
- INIT_COMPLETE                 = 104;
- FLUSH_PORT                    = 105;
- OPEN_PORT                     = 106;
- CLOSE_PORT                    = 107;
- SYSTEM_RESTART                = 109;
  OGF_MARKER                    = $00;
  OGF_HOST_CONTROL              = $03;
  OGF_INFORMATIONAL             = $04;
  OGF_VENDOR                    = $3f;
 
-type 
- TBTMarkerEvent = procedure (no:integer);
- PQueueItem = ^TQueueItem;
- TQueueItem = record
-  OpCode:Word;
-  Params:array of byte;
-  Prev,Next:PQueueItem;
- end;
-
 var 
- FWHandle:integer; // firmware file handle
+ FWHandle:integer;
  RxBuffer:array of byte;
+ CommandAcknowledged:TEvent;
  HciSequenceNumber:Integer;
  Console1:TWindowHandle;
  ch : char;
  UART0:PSerialDevice = Nil;
- First:PQueueItem = Nil;
- Last:PQueueItem = Nil;
  ReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
- Queue:TMailslotHandle;
- QueueHandle:TThreadHandle = INVALID_HANDLE_VALUE;
- QueueEvent:TEvent;
- MarkerEvent:TBTMarkerEvent = Nil;
  MonitorReadExecuteHandle:TThreadHandle = INVALID_HANDLE_VALUE;
+ MonitorKeyboardHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  HTTPListener:THTTPListener;
 
-procedure Log(s : string);
+procedure Log(s:string);
 begin
  ConsoleWindowWriteLn(Console1,s);
 end;
@@ -179,10 +157,10 @@ begin
    end;
  end;
  if num > 0 then
-  QueueEvent.SetEvent;
+  CommandAcknowledged.SetEvent;
 end;
 
-function Monitor(Parameter:Pointer):PtrInt;
+function MonitorReadExecute(Parameter:Pointer):PtrInt;
 var 
  Capture1,Capture2:Integer;
 begin
@@ -230,8 +208,6 @@ begin
         RxBuffer[high(RxBuffer)]:=b;
         res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
        end;
-      //if Length(RxBuffer) > 50 then
-      // Log(Format('rx buffer %d',[Length(RxBuffer)]));
       i:=0;
       decoding:=True;
       while decoding do
@@ -260,7 +236,7 @@ begin
       if i > 0 then
        begin
         rm:=length(RxBuffer) - i;
-        //              Log('Remaining ' + IntToStr(rm));
+        // Log('Remaining ' + IntToStr(rm));
         if rm > 0 then
          for j:=0 to rm - 1 do
           RxBuffer[j]:=RxBuffer[j + i];
@@ -300,120 +276,54 @@ begin
   end;
 end;
 
-procedure CloseUART0;
-begin
- if ReadHandle <> INVALID_HANDLE_VALUE then KillThread(ReadHandle);
- ReadHandle:=INVALID_HANDLE_VALUE;
- if UART0 <> nil then SerialDeviceClose(UART0);
- UART0:=Nil;
-end;
-
 procedure AddHCICommand(OpCode:Word; Params:array of byte);
 var 
- anItem:PQueueItem;
  i:integer;
+ Cmd:array of byte;
+ res,count:LongWord;
+ s:string;
 begin
- New(anItem);
- anItem^.OpCode:=OpCode;
- SetLength(anItem^.Params,length(Params));
+ Inc(HciSequenceNumber);
+ CommandAcknowledged.ResetEvent;
+ SetLength(Cmd,length(Params) + 4);
+ Cmd[0]:=HCI_COMMAND_PKT;
+ Cmd[1]:=lo(OpCode);          // little endian so lowest sent first
+ Cmd[2]:=hi(OpCode);
+ Cmd[3]:=length(Params);
  for i:=0 to length(Params) - 1 do
-  anItem^.Params[i]:=Params[i];
- anItem^.Next:=Nil;
- anItem^.Prev:=Last;
- if First = nil then First:=anItem;
- if Last <> nil then Last^.Next:=anItem;
- Last:=anItem;
- if MailSlotSend(Queue,Integer(anItem)) <> ERROR_SUCCESS then
-  Log('Error adding Command to queue.');
+  Cmd[4 + i]:=Params[i];
+ count:=0;
+{$ifdef show_data}
+ s:='';
+ for i:=0 to length(Cmd) - 1 do
+  s:=s + ' ' + Cmd[i].ToHexString(2);
+ Log('--> ' + s);
+{$endif}
+ res:=SerialDeviceWrite(UART0,@Cmd[0],length(Cmd),SERIAL_WRITE_NONE,count);
+ if res = ERROR_SUCCESS then
+  begin
+   if CommandAcknowledged.WaitFor(3*1000) <> wrSignaled then
+    begin
+     s:='';
+     for i:=0 to length(Cmd) - 1 do
+      s:=s + ' ' + Cmd[i].ToHexString(2);
+     Log(Format('hci command sequence number %d op code %4.4x',[HciSequenceNumber,OpCode]));
+     Log(Format('-->(%d) %s',[Length(Cmd),s]));
+     Log('Timeout waiting for BT Response.'); // should send nop ???
+     s:='';
+     for i:=0 to length(RxBuffer) - 1 do
+      s:=s + ' ' + RxBuffer[i].ToHexString(2);
+     Log('<-- ' + s);
+     ThreadHalt(0);
+    end;
+  end
+ else
+  Log('Error writing to BT.');
 end;
 
 procedure AddHCICommand(OGF:byte; OCF:Word; Params:array of byte);
 begin
  AddHCICommand((OGF shl 10) or OCF,Params);
-end;
-
-function QueueHandler(Parameter:Pointer):PtrInt;
-var 
- anItem:PQueueItem;
- Cmd:array of byte;
- i:integer;
- res,count:LongWord;
- s:string;
-begin
- Result:=0;
- while True do
-  begin
-   QueueEvent.ResetEvent;
-   anItem:=PQueueItem(MailslotReceive(Queue));
-   if anItem <> nil then
-    begin
-     Inc(HciSequenceNumber);
-     //if anItem^.OpCode <> $fc4c then
-     // Log(Format('started hci sequence %d op code %04.4x',[HciSequenceNumber,anItem^.OpCode]));
-     if (ogf(anItem^.OpCode) = OGF_MARKER) and(ocf(anItem^.OpCode) > 0) then
-      begin
-       case ocf(anItem^.OpCode) of 
-        DELAY_50MSEC:QueueEvent.WaitFor(50);
-        DELAY_2SEC   :
-                      begin
-                       QueueEvent.WaitFor(2000); Log('2 seconds');
-                      end;
-        OPEN_PORT   :OpenUART0;
-        CLOSE_PORT  :CloseUART0;
-       end;
-       if Assigned(@MarkerEvent) then MarkerEvent(ocf(anItem^.OpCode));
-      end
-     else
-      begin
-       SetLength(Cmd,length(anItem^.Params) + 4);
-       Cmd[0]:=HCI_COMMAND_PKT;
-       Cmd[1]:=lo(anItem^.OpCode);          // little endian so lowest sent first
-       Cmd[2]:=hi(anItem^.OpCode);
-       Cmd[3]:=length(anItem^.Params);
-       for i:=0 to length(anItem^.Params) - 1 do
-        Cmd[4 + i]:=anItem^.Params[i];
-       count:=0;
-{$ifdef show_data}
-       s:='';
-       for i:=0 to length(Cmd) - 1 do
-        s:=s + ' ' + Cmd[i].ToHexString(2);
-       Log('--> ' + s);
-{$endif}
-       res:=SerialDeviceWrite(UART0,@Cmd[0],length(Cmd),SERIAL_WRITE_NONE,count);
-       if res = ERROR_SUCCESS then
-        begin
-         if QueueEvent.WaitFor(3*1000) <> wrSignaled then
-          begin
-           s:='';
-           for i:=0 to length(Cmd) - 1 do
-            s:=s + ' ' + Cmd[i].ToHexString(2);
-           Log(Format('hci command sequence number %d op code %4.4x',[HciSequenceNumber,anItem^.OpCode]));
-           Log(Format('-->(%d) %s',[Length(Cmd),s]));
-           Log('Timeout waiting for BT Response.'); // should send nop ???
-           s:='';
-           for i:=0 to length(RxBuffer) - 1 do
-            s:=s + ' ' + RxBuffer[i].ToHexString(2);
-           Log('<-- ' + s);
-           ThreadHalt(0);
-          end;
-        end
-       else
-        Log('Error writing to BT.');
-      end;
-     SetLength(anItem^.Params,0);
-     Dispose(anItem);
-    end;
-  end;
-end;
-
-procedure NoOP;  // in spec but not liked by BCM chip
-begin
- AddHCICommand($00,$00,[]);
-end;
-
-procedure AddMarker(Marker:Word);
-begin
- AddHCICommand(OGF_MARKER,Marker and $3ff,[]);
 end;
 
 procedure ResetChip;
@@ -425,16 +335,13 @@ procedure BCMLoadFirmware(fn:string);
 var 
  hdr:array [0 .. 2] of byte;
  Params:array of byte;
- i,n,len:integer;
+ n,len:integer;
  Op:Word;
-const 
- FirmwareLoadDelays = 1;
 begin
- //Log('Loading Firmware file ' + fn);
  FWHandle:=FSFileOpen(fn,fmOpenRead);
  if FWHandle > 0 then
   begin
-   AddMarker(FIRMWARE_START);
+   Log('Firmware load ...');
    AddHCICommand(OGF_VENDOR,$2e,[]);
    n:=FSFileRead(FWHandle,hdr,3);
    while (n = 3) do
@@ -448,12 +355,7 @@ begin
      n:=FSFileRead(FWHandle,hdr,3);
     end;
    FSFileClose(FWHandle);
-   AddMarker(FIRMWARE_END);
-   AddMarker(CLOSE_PORT);
-   // AddMarker(DELAY_2SEC);
-   for I:=1 to FirmwareLoadDelays do
-    AddMarker(DELAY_50MSEC);
-   AddMarker(OPEN_PORT);
+   Log('Firmware load done');
   end
  else
   Log('Error loading Firmware file ' + fn);
@@ -465,29 +367,6 @@ begin
   sleep(500);
 end;
 
-procedure DoMarkerEvent(no : integer);
-begin
- case no of 
-  FIRMWARE_START : Log('Load Firmware ...');
-  FIRMWARE_END   : Log('Load Firmware done');
-  SYSTEM_RESTART :
-                  begin
-                   Log('test was successful - delaying 3 seconds then restarting to try to obtain failure ...');
-                   Sleep(3*1000);
-                   RestoreBootFile('test','config.txt');
-                   Log('restarting ...');
-                   Sleep(1*1000);
-                   SystemRestart(0);
-                  end;
-  //OPEN_PORT      : Log('Opening UART0.');
-  //CLOSE_PORT     : Log('Closing UART0.');
-  INIT_COMPLETE  :
-                  begin
-                   Log('BLE Chip Initialised');
-                  end;
- end;
-end;
-
 procedure StartLogging;
 begin
  LOGGING_INCLUDE_COUNTER:=False;
@@ -496,34 +375,19 @@ begin
  LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
 end;
 
+procedure TestRestart;
 begin
- Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_LEFT,True);
- Log('Bluetooth Low Energy (BLE) Peripheral Test');
- RestoreBootFile('default','config.txt');
- StartLogging;
- SetLength(RxBuffer,0);
- Queue:=MailSlotCreate(1024);
- QueueEvent:=TEvent.Create(Nil,True,False,'');
- QueueHandle:=BeginThread(@QueueHandler,Nil,QueueHandle,THREAD_STACK_DEFAULT_SIZE);
- MonitorReadExecuteHandle:=BeginThread(@Monitor,Nil,MonitorReadExecuteHandle,THREAD_STACK_DEFAULT_SIZE);
+ Log('test was successful - delaying 3 seconds then restarting to try to obtain failure ...');
+ Sleep(3*1000);
+ RestoreBootFile('test','config.txt');
+ Log('restarting ...');
+ Sleep(1*1000);
+ SystemRestart(0);
+end;
 
- Log('Q - Quit - use default-config.txt');
- Log('R - Restart - use test-config.txt');
- WaitForSDDrive;
-
-
- HTTPListener:=THTTPListener.Create;
- HTTPListener.Active:=True;
- WebStatusRegister(HTTPListener,'','',True);
-
- MarkerEvent:=@DoMarkerEvent;          // set marker event(called when marker processed on event queue)
- AddMarker(OPEN_PORT);                 // open uart
- AddMarker(DELAY_50MSEC);              // ensure read thread has started
- ResetChip;                            // reset chip
- BCMLoadFirmware('BCM43430A1.hcd');    // load firmware
- AddMarker(INIT_COMPLETE);             // indicate initialisation complete
- AddMarker(SYSTEM_RESTART);
-
+function MonitorKeyboard(Parameter:Pointer):PtrInt;
+begin
+ Result:=0;
  while True do
   begin
    if ConsoleGetKey(ch,nil) then
@@ -536,6 +400,31 @@ begin
           end;
      'C' : ConsoleWindowClear(Console1);
     end;
-   ThreadHalt(0);
   end;
+end;
+
+begin
+ Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_LEFT,True);
+ Log('Bluetooth Low Energy (BLE) Firmware Load Test');
+ RestoreBootFile('default','config.txt');
+ StartLogging;
+ SetLength(RxBuffer,0);
+ CommandAcknowledged:=TEvent.Create(Nil,True,False,'');
+ MonitorReadExecuteHandle:=BeginThread(@MonitorReadExecute,Nil,MonitorReadExecuteHandle,THREAD_STACK_DEFAULT_SIZE);
+ MonitorKeyboardHandle:=BeginThread(@MonitorKeyboard,Nil,MonitorKeyboardHandle,THREAD_STACK_DEFAULT_SIZE);
+
+ Log('Q - Quit - use default-config.txt');
+ Log('R - Restart - use test-config.txt');
+ WaitForSDDrive;
+
+ HTTPListener:=THTTPListener.Create;
+ HTTPListener.Active:=True;
+ WebStatusRegister(HTTPListener,'','',True);
+
+ OpenUart0;
+ Sleep(50);
+ ResetChip;                            // reset chip
+ BCMLoadFirmware('BCM43430A1.hcd');    // load firmware
+ Log('Init complete');
+ TestRestart;
 end.
