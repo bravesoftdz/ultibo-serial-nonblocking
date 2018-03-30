@@ -19,7 +19,6 @@ var
  Console1:TWindowHandle;
  ch:char;
  UART0:PSerialDevice = Nil;
- MonitorSerialDeviceReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  MonitorKeyboardHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  HTTPListener:THTTPListener;
 
@@ -122,21 +121,6 @@ begin
  end;
 end;
 
-function MonitorSerialDeviceRead(Parameter:Pointer):PtrInt;
-var 
- Capture1,Capture2:Integer;
-begin
- Result:=0;
- while True do
-  begin
-   Capture1:=SerialDeviceReadEnterCount;
-   Capture2:=SerialDeviceReadExitCount;
-   if Capture1 <> Capture2 then
-    Log(Format('Non-blocking SerialDeviceRead did not return: %d entries %d exits',[Capture1,Capture2]));
-   Sleep(5*1000);
-  end;
-end;
-
 procedure Fail(Message:String);
 begin
  Log(Message);
@@ -185,11 +169,12 @@ begin
    Result:=True;
    GPIOFunctionSelect(GPIO_PIN_14,GPIO_FUNCTION_IN);
    GPIOFunctionSelect(GPIO_PIN_15,GPIO_FUNCTION_IN);
-   // GPIOPullSelect(GPIO_PIN_32,GPIO_PULL_NONE);                    //Added
+
    GPIOFunctionSelect(GPIO_PIN_32,GPIO_FUNCTION_ALT3);     // TXD0
-   // GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);                        //Added
    GPIOFunctionSelect(GPIO_PIN_33,GPIO_FUNCTION_ALT3);     // RXD0
-   Result:=True;
+
+   GPIOPullSelect(GPIO_PIN_32,GPIO_PULL_NONE);             //Added
+   GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);               //Added
   end;
 end;
 
@@ -321,8 +306,6 @@ begin
  Log('Bluetooth Low Energy (BLE) Firmware Load Test');
  RestoreBootFile('default','config.txt');
  StartLogging;
- MonitorSerialDeviceReadHandle:=BeginThread(@MonitorSerialDeviceRead,Nil,MonitorSerialDeviceReadHandle,THREAD_STACK_DEFAULT_SIZE);
- ThreadSetCpu(MonitorSerialDeviceReadHandle,CpuGetCurrent);
  MonitorKeyboardHandle:=BeginThread(@MonitorKeyboard,Nil,MonitorKeyboardHandle,THREAD_STACK_DEFAULT_SIZE);
 
  Log('Q - Quit - use default-config.txt');

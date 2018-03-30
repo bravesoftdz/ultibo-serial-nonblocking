@@ -8,7 +8,7 @@ ULTIBOBIN=$ULTIBO/fpc/bin
 LPR=BLETest.lpr
 export PATH=$ULTIBOBIN:$PATH
 
-for f in *.lpr *.pas
+for f in *.lpr
 do
     ptop -l 1000 -i 1 -c ptop.cfg $f $f.2
     mv $f.2 $f
