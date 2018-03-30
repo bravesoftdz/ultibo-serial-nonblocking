@@ -15,12 +15,10 @@ const
 
 var 
  FWHandle:integer;
- CommandAcknowledged:TEvent;
  HciSequenceNumber:Integer;
  Console1:TWindowHandle;
  ch:char;
  UART0:PSerialDevice = Nil;
- ReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  MonitorSerialDeviceReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  MonitorKeyboardHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  HTTPListener:THTTPListener;
@@ -151,9 +149,11 @@ var
  c:LongWord;
  b:Byte;
  res:Integer;
+ timestamp:LongWord;
 begin
  Result:=0;
- while True do
+ timestamp:=ClockGetCount;
+ while ClockGetCount - timestamp < 3*1000*1000 do
   begin
    c:=0;
    res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
@@ -165,44 +165,7 @@ begin
    else
     ThreadYield;
   end;
-end;
-
-function ReadExecute(Parameter:Pointer):PtrInt;
-var 
- PacketType,EventCode,PacketLength,CanAcceptPackets,Status:Byte;
-begin
- try
-  Result:=0;
-  Log(Format('ReadExecute thread handle %8.8x',[ThreadGetCurrent]));
-  SerialDeviceReadResetEnterExitCounts;
-  // put monitoring thread on same cpu as ReadExecute to avoid cross-cpu caching issues
-  ThreadSetCpu(MonitorSerialDeviceReadHandle,CpuGetCurrent);
-  ThreadYield;
-  while True do
-   begin
-    PacketType:=ReadByte;
-    if PacketType <> HCI_EVENT_PKT then
-     Fail(Format('event type not hci event: %d',[PacketType]));
-    EventCode:=ReadByte;
-    if EventCode <> $0E then
-     Fail(Format('event code not command completed: %d',[EventCode]));
-    PacketLength:=ReadByte;
-    if PacketLength <> 4 then
-     Fail(Format('packet length not 4: %d',[PacketLength]));
-    CanAcceptPackets:=ReadByte;
-    if CanAcceptPackets <> 1 then
-     Fail(Format('can accept packets not 1: %d',[CanAcceptPackets]));
-    ReadByte; // completed command low
-    ReadByte; // completed command high
-    Status:=ReadByte;
-    if Status <> 0 then
-     Fail(Format('status not 0: %d',[Status]));
-    CommandAcknowledged.SetEvent
-   end;
- except
-  on E:Exception do
-       Log(Format('ReadExecute exception %s',[E.Message]));
-end;
+ Fail('timeout waiting for serial read byte');
 end;
 
 function OpenUART0:boolean;
@@ -226,8 +189,7 @@ begin
    GPIOFunctionSelect(GPIO_PIN_32,GPIO_FUNCTION_ALT3);     // TXD0
    // GPIOPullSelect(GPIO_PIN_33,GPIO_PULL_UP);                        //Added
    GPIOFunctionSelect(GPIO_PIN_33,GPIO_FUNCTION_ALT3);     // RXD0
-   ReadHandle:=BeginThread(@ReadExecute,Nil,ReadHandle,THREAD_STACK_DEFAULT_SIZE);
-   Result:=ReadHandle <> INVALID_HANDLE_VALUE;
+   Result:=True;
   end;
 end;
 
@@ -236,10 +198,9 @@ var
  i:integer;
  Cmd:array of byte;
  res,count:LongWord;
- s:string;
+ PacketType,EventCode,PacketLength,CanAcceptPackets,Status:Byte;
 begin
  Inc(HciSequenceNumber);
- CommandAcknowledged.ResetEvent;
  SetLength(Cmd,length(Params) + 4);
  Cmd[0]:=HCI_COMMAND_PKT;
  Cmd[1]:=lo(OpCode);          // little endian so lowest sent first
@@ -251,20 +212,23 @@ begin
  res:=SerialDeviceWrite(UART0,@Cmd[0],length(Cmd),SERIAL_WRITE_NONE,count);
  if res = ERROR_SUCCESS then
   begin
-   if CommandAcknowledged.WaitFor(3*1000) <> wrSignaled then
-    begin
-     s:='';
-     for i:=0 to length(Cmd) - 1 do
-      s:=s + ' ' + Cmd[i].ToHexString(2);
-     Log(Format('hci command sequence number %d op code %4.4x',[HciSequenceNumber,OpCode]));
-     Log(Format('-->(%d) %s',[Length(Cmd),s]));
-     Log('Timeout waiting for BT Response.'); // should send nop ???
-     s:='';
-     //   for i:=0 to length(RxBuffer) - 1 do
-     //    s:=s + ' ' + RxBuffer[i].ToHexString(2);
-     Log('<-- ' + s);
-     ThreadHalt(0);
-    end;
+   PacketType:=ReadByte;
+   if PacketType <> HCI_EVENT_PKT then
+    Fail(Format('event type not hci event: %d',[PacketType]));
+   EventCode:=ReadByte;
+   if EventCode <> $0E then
+    Fail(Format('event code not command completed: %d',[EventCode]));
+   PacketLength:=ReadByte;
+   if PacketLength <> 4 then
+    Fail(Format('packet length not 4: %d',[PacketLength]));
+   CanAcceptPackets:=ReadByte;
+   if CanAcceptPackets <> 1 then
+    Fail(Format('can accept packets not 1: %d',[CanAcceptPackets]));
+   ReadByte; // completed command low
+   ReadByte; // completed command high
+   Status:=ReadByte;
+   if Status <> 0 then
+    Fail(Format('status not 0: %d',[Status]));
   end
  else
   Log('Error writing to BT.');
@@ -357,8 +321,8 @@ begin
  Log('Bluetooth Low Energy (BLE) Firmware Load Test');
  RestoreBootFile('default','config.txt');
  StartLogging;
- CommandAcknowledged:=TEvent.Create(Nil,True,False,'');
  MonitorSerialDeviceReadHandle:=BeginThread(@MonitorSerialDeviceRead,Nil,MonitorSerialDeviceReadHandle,THREAD_STACK_DEFAULT_SIZE);
+ ThreadSetCpu(MonitorSerialDeviceReadHandle,CpuGetCurrent);
  MonitorKeyboardHandle:=BeginThread(@MonitorKeyboard,Nil,MonitorKeyboardHandle,THREAD_STACK_DEFAULT_SIZE);
 
  Log('Q - Quit - use default-config.txt');
