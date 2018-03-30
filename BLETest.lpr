@@ -1,29 +1,27 @@
 program BLETest;
 {$mode objfpc}{$H+}
-//{$define show_data}
 
 uses 
 RaspberryPi3,HTTP,WebStatus,GlobalConfig,GlobalConst,GlobalTypes,Platform,Threads,SysUtils,
 Classes,Console,Keyboard,Logging,Ultibo,Serial,BCM2710,FileSystem,SyncObjs;
 
 const 
- HCI_COMMAND_PKT               = $01;
- HCI_EVENT_PKT                 = $04;
- OGF_MARKER                    = $00;
- OGF_HOST_CONTROL              = $03;
- OGF_INFORMATIONAL             = $04;
- OGF_VENDOR                    = $3f;
+ HCI_COMMAND_PKT   = $01;
+ HCI_EVENT_PKT     = $04;
+ OGF_MARKER        = $00;
+ OGF_HOST_CONTROL  = $03;
+ OGF_INFORMATIONAL = $04;
+ OGF_VENDOR        = $3f;
 
 var 
  FWHandle:integer;
- RxBuffer:array of byte;
  CommandAcknowledged:TEvent;
  HciSequenceNumber:Integer;
  Console1:TWindowHandle;
- ch : char;
+ ch:char;
  UART0:PSerialDevice = Nil;
  ReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
- MonitorReadExecuteHandle:TThreadHandle = INVALID_HANDLE_VALUE;
+ MonitorSerialDeviceReadHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  MonitorKeyboardHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  HTTPListener:THTTPListener;
 
@@ -126,41 +124,7 @@ begin
  end;
 end;
 
-procedure DecodeEvent(ev:array of byte);
-var 
- len,num:byte;
- i:integer;
- s:string;
- // op:word;
-begin
- if length(ev) < 3 then exit;
- if ev[0] <> HCI_EVENT_PKT then
-  exit;
- len:=ev[2];
- num:=0;
- if len + 2 <> high(ev) then exit;
- case ev[1] of 
-  // event code
-  $0e:  // command complete
-      begin
-       num:=ev[3];          // num packets controller can accept
-       //       op:=ev[5] * $100 + ev[4];
-       //Log('OGF ' + inttohex(ogf(op),2) + ' OCF ' + inttohex(ocf(op),3) + ' OP Code ' + inttohex(op,4) + ' Num ' + num.ToString + ' Len ' + len.ToString);
-       if (len > 3) and(ev[6] > 0) then Log('Status ' + ErrToStr(ev[6]));
-      end;
-  else
-   begin
-    s:='';
-    for i:=low(ev) + 1 to high(ev) do
-     s:=s + ' ' + ev[i].ToHexString(2);
-    Log('Unknown event ' + s);
-   end;
- end;
- if num > 0 then
-  CommandAcknowledged.SetEvent;
-end;
-
-function MonitorReadExecute(Parameter:Pointer):PtrInt;
+function MonitorSerialDeviceRead(Parameter:Pointer):PtrInt;
 var 
  Capture1,Capture2:Integer;
 begin
@@ -170,79 +134,70 @@ begin
    Capture1:=SerialDeviceReadEnterCount;
    Capture2:=SerialDeviceReadExitCount;
    if Capture1 <> Capture2 then
-    Log(Format('SerialDeviceRead is not balanced: %d entries %d exits',[Capture1,Capture2]));
+    Log(Format('Non-blocking SerialDeviceRead did not return: %d entries %d exits',[Capture1,Capture2]));
    Sleep(5*1000);
+  end;
+end;
+
+procedure Fail(Message:String);
+begin
+ Log(Message);
+ while True do
+  Sleep(1*1000);
+end;
+
+function Readbyte:Byte;
+var 
+ c:LongWord;
+ b:Byte;
+ res:Integer;
+begin
+ Result:=0;
+ while True do
+  begin
+   c:=0;
+   res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
+   if (res = ERROR_SUCCESS) and (c = 1) then
+    begin
+     Result:=b;
+     Exit;
+    end
+   else
+    ThreadYield;
   end;
 end;
 
 function ReadExecute(Parameter:Pointer):PtrInt;
 var 
- c:LongWord;
- b:byte;
- i,j,rm:integer;
- decoding:boolean;
- pkt:array of byte;
- res:LongWord;
+ PacketType,EventCode,PacketLength,CanAcceptPackets,Status:Byte;
 begin
  try
   Result:=0;
   Log(Format('ReadExecute thread handle %8.8x',[ThreadGetCurrent]));
   SerialDeviceReadResetEnterExitCounts;
   // put monitoring thread on same cpu as ReadExecute to avoid cross-cpu caching issues
-  ThreadSetCpu(MonitorReadExecuteHandle,CpuGetCurrent);
+  ThreadSetCpu(MonitorSerialDeviceReadHandle,CpuGetCurrent);
   ThreadYield;
-  c:=0;
   while True do
    begin
-    ThreadYield;
-    res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-    if (res = ERROR_SUCCESS) and (c = 1) then
-     begin
-      // One byte was received,try to read everything that is available
-      SetLength(RxBuffer,length(RxBuffer) + 1);
-      RxBuffer[high(RxBuffer)]:=b;
-      res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-      while (res = ERROR_SUCCESS) and(c = 1) do
-       begin
-        SetLength(RxBuffer,length(RxBuffer) + 1);
-        RxBuffer[high(RxBuffer)]:=b;
-        res:=SerialDeviceRead(UART0,@b,1,SERIAL_READ_NON_BLOCK,c);
-       end;
-      i:=0;
-      decoding:=True;
-      while decoding do
-       begin
-        decoding:=False;
-        if RxBuffer[i] <> HCI_EVENT_PKT then
-         Log(Format('not event %d',[RxBuffer[i]]))
-        else if (i + 2 <= high(RxBuffer)) then // mimumum
-              if i + RxBuffer[i + 2] + 2 <= high(RxBuffer) then
-               begin
-                SetLength(pkt,RxBuffer[i + 2] + 3);
-                for j:=0 to length(pkt) - 1 do
-                 pkt[j]:=RxBuffer[i + j];
-{$ifdef show_data}
-                s:='';
-                for j:=low(pkt) to high(pkt) do
-                 s:=s + ' ' + pkt[j].ToHexString(2);
-                Log('<--' + s);
-{$endif}
-                DecodeEvent(pkt);
-                i:=i + length(pkt);
-                decoding:=i < high(RxBuffer);
-               end;
-       end;
-      // decoding
-      if i > 0 then
-       begin
-        rm:=length(RxBuffer) - i;
-        // Log('Remaining ' + IntToStr(rm));
-        if rm > 0 then
-         for j:=0 to rm - 1 do
-          RxBuffer[j]:=RxBuffer[j + i];
-        SetLength(RxBuffer,rm);
-       end;
-     end;
+    PacketType:=ReadByte;
+    if PacketType <> HCI_EVENT_PKT then
+     Fail(Format('event type not hci event: %d',[PacketType]));
+    EventCode:=ReadByte;
+    if EventCode <> $0E then
+     Fail(Format('event code not command completed: %d',[EventCode]));
+    PacketLength:=ReadByte;
+    if PacketLength <> 4 then
+     Fail(Format('packet length not 4: %d',[PacketLength]));
+    CanAcceptPackets:=ReadByte;
+    if CanAcceptPackets <> 1 then
+     Fail(Format('can accept packets not 1: %d',[CanAcceptPackets]));
+    ReadByte; // completed command low
+    ReadByte; // completed command high
+    Status:=ReadByte;
+    if Status <> 0 then
+     Fail(Format('status not 0: %d',[Status]));
+    CommandAcknowledged.SetEvent
    end;
  except
   on E:Exception do
@@ -293,12 +248,6 @@ begin
  for i:=0 to length(Params) - 1 do
   Cmd[4 + i]:=Params[i];
  count:=0;
-{$ifdef show_data}
- s:='';
- for i:=0 to length(Cmd) - 1 do
-  s:=s + ' ' + Cmd[i].ToHexString(2);
- Log('--> ' + s);
-{$endif}
  res:=SerialDeviceWrite(UART0,@Cmd[0],length(Cmd),SERIAL_WRITE_NONE,count);
  if res = ERROR_SUCCESS then
   begin
@@ -311,8 +260,8 @@ begin
      Log(Format('-->(%d) %s',[Length(Cmd),s]));
      Log('Timeout waiting for BT Response.'); // should send nop ???
      s:='';
-     for i:=0 to length(RxBuffer) - 1 do
-      s:=s + ' ' + RxBuffer[i].ToHexString(2);
+     //   for i:=0 to length(RxBuffer) - 1 do
+     //    s:=s + ' ' + RxBuffer[i].ToHexString(2);
      Log('<-- ' + s);
      ThreadHalt(0);
     end;
@@ -408,9 +357,8 @@ begin
  Log('Bluetooth Low Energy (BLE) Firmware Load Test');
  RestoreBootFile('default','config.txt');
  StartLogging;
- SetLength(RxBuffer,0);
  CommandAcknowledged:=TEvent.Create(Nil,True,False,'');
- MonitorReadExecuteHandle:=BeginThread(@MonitorReadExecute,Nil,MonitorReadExecuteHandle,THREAD_STACK_DEFAULT_SIZE);
+ MonitorSerialDeviceReadHandle:=BeginThread(@MonitorSerialDeviceRead,Nil,MonitorSerialDeviceReadHandle,THREAD_STACK_DEFAULT_SIZE);
  MonitorKeyboardHandle:=BeginThread(@MonitorKeyboard,Nil,MonitorKeyboardHandle,THREAD_STACK_DEFAULT_SIZE);
 
  Log('Q - Quit - use default-config.txt');
